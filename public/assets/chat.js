@@ -1,17 +1,19 @@
 (() => {
   const $ = (s) => document.querySelector(s);
   const box = $('#msgs');
-  if (!box) return;
+  if (!box || !window.AgahBrain) return;
   const form = $('#composer'), input = $('#msg'), sendBtn = $('#send'), chips = $('#chips');
   const dot = $('#dot'), dotText = $('#dotText');
-  const KEY = 'agah_chat_v1', PKEY = 'agah_profile_v1';
+  const KEY = 'agah_chat_v2', PKEY = 'agah_profile_v1';
+  const DEFAULT_CHIPS = [...chips.querySelectorAll('button')].map((b) => b.textContent);
 
   const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
   const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
 
   let history = load(KEY, []);
   let profile = load(PKEY, {});
-  let busy = false, last = 0, controller = null;
+  let busy = false, last = 0;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   const esc = (s) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const inline = (s) => s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
@@ -31,6 +33,7 @@
     return out;
   }
 
+  const scroll = () => { box.scrollTop = box.scrollHeight; };
   function add(role, text) {
     const el = document.createElement('div');
     el.className = 'm ' + (role === 'user' ? 'u' : 'a');
@@ -39,88 +42,59 @@
     scroll();
     return el;
   }
-  const scroll = () => { box.scrollTop = box.scrollHeight; };
+  function setChips(list) {
+    chips.innerHTML = '';
+    (list || []).forEach((c) => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.textContent = c;
+      b.addEventListener('click', () => send(c));
+      chips.appendChild(b);
+    });
+    chips.hidden = !(list && list.length);
+  }
 
   function greet() {
-    add('assistant', 'سلام! 👋 من دستیار آگاهم.\nمی‌تونم کمکت کنم وقت‌تلف‌کردن توی اپ‌ها رو کم کنی، خرج‌هات رو آگاهانه‌تر ببینی و عادت‌های بهتری بسازی.\nاز چی شروع کنیم؟');
+    add('assistant', 'سلام! 👋 من «مغز آگاه» هستم؛ دستیار اختصاصی آگاه که کاملاً داخل مرورگر خودت اجرا می‌شه.\nمی‌تونم برنامه‌ی ۷ روزه برای کم کردن اسکرول بسازم، بودجه ببندم، خوابت رو مرتب کنم و به سؤال‌های عادت و روان‌شناسی جواب بدم. اگه بذاری بیشتر آشنا بشیم، پیشنهادهام خیلی شخصی‌تر می‌شن.');
   }
   function render() {
     box.innerHTML = '';
     if (!history.length) greet();
     history.forEach((m) => add(m.role, m.content));
+    setChips(DEFAULT_CHIPS);
   }
 
   function setBusy(v) { busy = v; sendBtn.disabled = v; }
   function autosize() { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 140) + 'px'; }
 
-  function errText(code) {
-    if (code === 'ai_not_configured') return 'سرویس هوش مصنوعی هنوز روی سرور فعال نشده. (راهنمای README رو ببین)';
-    if (code === 'rate_limited' || code === '429') return 'یه کم سریع بودی 😅 چند لحظه صبر کن و دوباره امتحان کن.';
-    if (code === 'too_large' || code === '413') return 'پیامت زیادی بلنده؛ کوتاه‌ترش کن.';
-    return 'ارتباط با دستیار برقرار نشد. اینترنتت رو بررسی کن و دوباره امتحان کن.';
+  async function typeOut(el, text) {
+    const n = text.length, step = Math.max(2, Math.ceil(n / 90));
+    for (let i = step; i < n; i += step) { el.innerHTML = md(text.slice(0, i)); scroll(); await sleep(14); }
+    el.innerHTML = md(text); scroll();
+  }
+
+  async function respond(getReply, userText) {
+    const bot = add('assistant', '');
+    bot.innerHTML = '<span class="dots"><i></i><i></i><i></i></span>';
+    setBusy(true); setChips([]);
+    await sleep(380 + Math.min(700, (userText || '').length * 6));
+    let r;
+    try { window.AgahBrain.setProfile(profile); r = getReply(); } catch (e) { r = { text: 'یه مشکل کوچیک پیش اومد؛ دوباره بگو.', chips: [] }; }
+    await typeOut(bot, r.text);
+    history.push({ role: 'assistant', content: r.text });
+    save(KEY, history.slice(-60));
+    setChips(r.chips && r.chips.length ? r.chips : DEFAULT_CHIPS.slice(0, 3));
+    setBusy(false);
   }
 
   async function send(text) {
     text = (text || '').trim();
     if (!text || busy) return;
-    if (Date.now() - last < 1200) return;
+    if (Date.now() - last < 500) return;
     last = Date.now();
     input.value = ''; autosize();
-    chips.hidden = true;
     history.push({ role: 'user', content: text });
     add('user', text);
-    const bot = add('assistant', '');
-    bot.innerHTML = '<span class="dots"><i></i><i></i><i></i></span>';
-    setBusy(true);
-    controller = new AbortController();
-    let acc = '';
-    try {
-      const res = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ messages: history.slice(-12), profile }),
-        signal: controller.signal,
-      });
-      if (!res.ok) {
-        let e = String(res.status);
-        try { e = (await res.json()).error || e; } catch {}
-        throw new Error(e);
-      }
-      const reader = res.body.getReader();
-      const dec = new TextDecoder();
-      let buf = '';
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        let i;
-        while ((i = buf.indexOf('\n')) >= 0) {
-          const line = buf.slice(0, i).trim();
-          buf = buf.slice(i + 1);
-          if (!line.startsWith('data:')) continue;
-          const d = line.slice(5).trim();
-          if (!d || d === '[DONE]') continue;
-          try {
-            const j = JSON.parse(d);
-            const piece = j.response ?? j.choices?.[0]?.delta?.content ?? '';
-            if (piece) { acc += piece; bot.innerHTML = md(acc); scroll(); }
-          } catch {}
-        }
-      }
-      if (!acc.trim()) throw new Error('empty');
-      history.push({ role: 'assistant', content: acc });
-    } catch (err) {
-      if (err.name === 'AbortError') {
-        if (acc) history.push({ role: 'assistant', content: acc }); else bot.remove();
-      } else {
-        bot.classList.add('err');
-        bot.textContent = errText(err.message);
-        history.pop();
-      }
-    } finally {
-      setBusy(false);
-      save(KEY, history.slice(-40));
-    }
+    await respond(() => window.AgahBrain.answer(text), text);
   }
 
   form.addEventListener('submit', (e) => { e.preventDefault(); send(input.value); });
@@ -128,47 +102,45 @@
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(input.value); }
   });
-  chips.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => send(b.textContent)));
   $('#clear').addEventListener('click', () => {
-    if (controller) controller.abort();
-    history = []; save(KEY, []); chips.hidden = false; render();
+    window.AgahBrain.reset();
+    history = []; save(KEY, []); render();
   });
 
-  // profile
+  // پروفایل کناری
   const map = { 'p-goal': 'goal', 'p-app': 'app', 'p-budget': 'budget', 'p-goalname': 'goalName', 'p-focus': 'focus' };
   Object.entries(map).forEach(([id, k]) => {
     const el = document.getElementById(id);
     if (!el) return;
     if (profile[k] != null) el.value = profile[k];
-    el.addEventListener('input', () => { profile[k] = el.value; save(PKEY, profile); });
+    el.addEventListener('input', () => { profile[k] = el.value; save(PKEY, profile); window.AgahBrain.setProfile(profile); });
   });
-  profile.target = profile.target || '';
 
-  // daily check-in
+  // چک‌این روزانه (فرم کناری)
   let mood = '';
   document.querySelectorAll('#moods button').forEach((b) => b.addEventListener('click', () => {
     document.querySelectorAll('#moods button').forEach((x) => x.classList.remove('on'));
     mood = mood === b.dataset.m ? '' : b.dataset.m;
     if (mood) b.classList.add('on');
   }));
-  $('#checkin').addEventListener('submit', (e) => {
+  $('#checkin').addEventListener('submit', async (e) => {
     e.preventDefault();
+    if (busy) return;
     const s = $('#c-screen').value, sp = $('#c-spend').value;
+    if (!s && !sp) return;
     const parts = [];
     if (s) parts.push(`امروز ${s} دقیقه روی اپ‌های وقت‌گیر بودم`);
     if (sp) parts.push(`${sp} تومان خرج کردم`);
     if (mood) parts.push(`حالم ${mood} بود`);
-    if (!parts.length) return;
-    send('چک‌این امروزم: ' + parts.join('، ') + '. نظرت چیه و برای فردا چه کار کوچیکی پیشنهاد می‌دی؟');
+    const text = 'چک‌این امروزم: ' + parts.join('، ');
+    history.push({ role: 'user', content: text });
+    add('user', text);
     $('#assistant').scrollIntoView({ behavior: 'smooth' });
+    await respond(() => window.AgahBrain.checkin({ scr: +s || 0, sp: +sp || 0, mood }), text);
   });
 
-  // status
-  fetch('/api/health').then((r) => r.json()).then((j) => {
-    if (j.ok && j.ai) { dot.className = 'dot on'; dotText.textContent = 'آنلاین'; }
-    else { dot.className = 'dot off'; dotText.textContent = 'هوش مصنوعی فعال نیست'; }
-  }).catch(() => { dot.className = 'dot off'; dotText.textContent = 'آفلاین'; });
-
+  dot.className = 'dot on';
+  dotText.textContent = 'اجرا در مرورگر تو • بدون ارسال داده';
   render();
   if (new URLSearchParams(location.search).get('from') === 'app') setTimeout(() => input.focus({ preventScroll: true }), 1200);
 })();
